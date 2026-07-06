@@ -303,6 +303,13 @@ function develop(pkg::PackageSpec)
 
     # For dev, we don't create an app environment - just point shims directly to the dev'd project
     write_manifest(manifest, app_manifest_file())
+
+    # The shims run with the dev'd project as the load path so it needs
+    # a resolved manifest for the dependencies to be loadable
+    Pkg.activate(sourcepath) do
+        Pkg.instantiate()
+    end
+
     generate_shims_for_apps(pkg.name, project.apps, sourcepath, joinpath(Sys.BINDIR, "julia"))
 
     @info "For package: $(pkg.name) installed apps: $(join(keys(project.apps), ","))"

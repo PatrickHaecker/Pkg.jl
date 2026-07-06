@@ -185,6 +185,15 @@ using Test
                 @test read(`$exename`, String) == "hello from SomeDep\n"
             end
             Pkg.Apps.rm("SomeApp")
+
+            # develop of an app with dependencies should give it a resolved
+            # manifest so the dependencies can be loaded (#4697)
+            Pkg.Apps.develop(path = someapp)
+            @test isfile(joinpath(someapp, "Manifest.toml"))
+            withenv("PATH" => string(joinpath(first(DEPOT_PATH), "bin"), sep, current_path)) do
+                @test read(`$exename`, String) == "hello from SomeDep\n"
+            end
+            Pkg.Apps.rm("SomeApp")
         end
     end
 
