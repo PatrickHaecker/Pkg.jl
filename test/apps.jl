@@ -79,6 +79,9 @@ using Test
             @test isempty(manifest.deps)
             # Removing something that is not installed errors
             @test_throws Pkg.Types.PkgError Pkg.Apps.rm("juliarot13")
+            # add/develop with nothing to add errors
+            @test_throws Pkg.Types.PkgError Pkg.Apps.add()
+            @test_throws Pkg.Types.PkgError Pkg.Apps.develop()
         end
     end
 
@@ -176,6 +179,7 @@ using Test
 
                 [apps]
                 someapp = {}
+                someapp2 = {}
                 """
             )
             write(
@@ -198,6 +202,9 @@ using Test
             end
 
             # update of a repo-tracked app fetches the latest commit (#4634)
+            # and removes shims for apps the new version no longer provides
+            exename2 = Sys.iswindows() ? "someapp2.bat" : "someapp2"
+            @test isfile(joinpath(first(DEPOT_PATH), "bin", exename2))
             write(
                 joinpath(someapp, "src", "SomeApp.jl"), """
                 module SomeApp
@@ -210,11 +217,28 @@ using Test
                 end
                 """
             )
+            write(
+                joinpath(someapp, "Project.toml"), """
+                name = "SomeApp"
+                uuid = "6fe06ad9-5ce4-4b58-bb0c-29b0d7e1fd75"
+                version = "0.2.0"
+
+                [deps]
+                SomeDep = "b5c6e794-171e-4c69-906b-483714562d9a"
+
+                [sources]
+                SomeDep = {path = "../SomeDep"}
+
+                [apps]
+                someapp = {}
+                """
+            )
             git_init_and_commit(someapp; msg = "v2")
             Pkg.Apps.update("SomeApp")
             withenv("PATH" => string(joinpath(first(DEPOT_PATH), "bin"), sep, current_path)) do
                 @test read(`$exename`, String) == "hello from SomeDep\nv2\n"
             end
+            @test !isfile(joinpath(first(DEPOT_PATH), "bin", exename2))
             Pkg.Apps.rm("SomeApp")
 
             # develop of an app with dependencies should give it a resolved

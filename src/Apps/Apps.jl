@@ -16,6 +16,7 @@ public add, rm, status, update, develop
 app_env_folder() = joinpath(first(DEPOT_PATH), "environments", "apps")
 app_manifest_file() = joinpath(app_env_folder(), "AppManifest.toml")
 julia_bin_path() = joinpath(first(DEPOT_PATH), "bin")
+julia_executable() = joinpath(Sys.BINDIR, "julia" * (Sys.iswindows() ? ".exe" : ""))
 
 app_context() = Context(env = EnvCache(joinpath(app_env_folder(), "Project.toml")))
 
@@ -120,6 +121,11 @@ function get_max_version_register(pkg::PackageSpec, regs)
                     pkg.version == version || continue
                 else
                     version in pkg.version || continue
+                    # Skip versions that are not compatible with the running julia
+                    julia_compat = Registry.query_compat_for_version(pkg_info, version, Registry.JULIA_UUID)
+                    if julia_compat !== nothing && !(VERSION in julia_compat)
+                        continue
+                    end
                 end
                 if max_v === nothing || version > max_v
                     max_v = version
@@ -132,6 +138,26 @@ function get_max_version_register(pkg::PackageSpec, regs)
         error("Suitable package version for $(pkg.name) not found in any registries.")
     end
     return (max_v, tree_hash)
+end
+
+
+# Remove shims from a previous version of the package that it no longer
+# provides and warn about app names that other packages already provide
+function reconcile_shims(manifest::Manifest, pkg::PackageSpec, project)
+    old_entry = get(manifest.deps, pkg.uuid, nothing)
+    if old_entry !== nothing
+        for appname in keys(old_entry.apps)
+            haskey(project.apps, appname) || rm_shim(appname; force = true)
+        end
+    end
+    for (uuid, entry) in manifest.deps
+        uuid == pkg.uuid && continue
+        overlap = sort!(collect(intersect(keys(entry.apps), keys(project.apps))))
+        if !isempty(overlap)
+            @warn "Overwriting apps $(join(overlap, ", ")) provided by package $(entry.name)"
+        end
+    end
+    return
 end
 
 
@@ -210,7 +236,7 @@ function _resolve(manifest::Manifest, pkgname = nothing)
         end
 
         # TODO: Julia path
-        generate_shims_for_apps(pkg.name, pkg.apps, dirname(projectfile), joinpath(Sys.BINDIR, "julia"))
+        generate_shims_for_apps(pkg.name, pkg.apps, dirname(projectfile), julia_executable())
     end
     return write_manifest(manifest, app_manifest_file())
 end
@@ -234,6 +260,7 @@ Pkg.Apps.add(path = "path/to/Package")
 ```
 """
 function add(pkg::Vector{PackageSpec})
+    require_not_empty(pkg, :add)
     for p in pkg
         add(p)
     end
@@ -271,6 +298,7 @@ function add(pkg::PackageSpec)
     Base.rm(joinpath(app_env_folder(), pkg.name); force = true, recursive = true)
     sourcepath = source_path(ctx.env.manifest_file, pkg)
     project = get_project(sourcepath)
+    reconcile_shims(manifest, pkg, project)
     # TODO: Wrong if package itself has a sourcepath?
     # PackageEntry requires version::Union{VersionNumber, Nothing}, but project.version can be VersionSpec
     entry = PackageEntry(; apps = project.apps, name = pkg.name, version = project.version isa VersionNumber ? project.version : nothing, tree_hash = pkg.tree_hash, path = pkg.path, repo = pkg.repo, uuid = pkg.uuid)
@@ -300,6 +328,7 @@ Pkg.Apps.develop(path = "path/to/Package")
 ```
 """
 function develop(pkg::Vector{PackageSpec})
+    require_not_empty(pkg, :develop)
     for p in pkg
         develop(p)
     end
@@ -328,6 +357,7 @@ function develop(pkg::PackageSpec)
     # PackageEntry requires version::Union{VersionNumber, Nothing}, but project.version can be VersionSpec
     entry = PackageEntry(; apps = project.apps, name = pkg.name, version = project.version isa VersionNumber ? project.version : nothing, tree_hash = pkg.tree_hash, path = sourcepath, repo = pkg.repo, uuid = pkg.uuid)
     manifest = ctx.env.manifest
+    reconcile_shims(manifest, pkg, project)
     manifest.deps[pkg.uuid] = entry
 
     # For dev, we don't create an app environment - just point shims directly to the dev'd project
@@ -339,7 +369,7 @@ function develop(pkg::PackageSpec)
         Pkg.instantiate()
     end
 
-    generate_shims_for_apps(pkg.name, project.apps, sourcepath, joinpath(Sys.BINDIR, "julia"))
+    generate_shims_for_apps(pkg.name, project.apps, sourcepath, julia_executable())
 
     @info "For package: $(pkg.name) installed apps: $(join(keys(project.apps), ","))"
     return check_apps_in_path(project.apps)
@@ -463,7 +493,10 @@ function precompile(pkg::Union{Nothing, String} = nothing)
         if pkg !== nothing && info.name !== pkg
             continue
         end
-        Pkg.activate(joinpath(app_env_folder(), info.name)) do
+        # Developed apps run directly from their project, tracked ones from the app environment
+        env_dir = info.path !== nothing ? abspath(source_path(app_manifest_file(), info)) :
+            joinpath(app_env_folder(), info.name)
+        Pkg.activate(env_dir) do
             Pkg.instantiate()
             Pkg.precompile()
         end
