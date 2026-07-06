@@ -111,9 +111,8 @@ function get_max_version_register(pkg::PackageSpec, regs)
     max_v = nothing
     tree_hash = nothing
     for reg in regs
-        if get(reg, pkg.uuid, nothing) !== nothing
-            reg_pkg = get(reg, pkg.uuid, nothing)
-            reg_pkg === nothing && continue
+        reg_pkg = get(reg, pkg.uuid, nothing)
+        if reg_pkg !== nothing
             pkg_info = Registry.registry_info(reg, reg_pkg)
             for (version, info) in pkg_info.version_info
                 info.yanked && continue
@@ -381,7 +380,7 @@ end
 function status(pkg_or_app::Union{PackageSpec, Nothing} = nothing)
     # TODO: Sort.
     pkg_or_app = pkg_or_app === nothing ? nothing : pkg_or_app.name
-    manifest = Pkg.Types.read_manifest(joinpath(app_env_folder(), "AppManifest.toml"))
+    manifest = Pkg.Types.read_manifest(app_manifest_file())
     deps = Pkg.Operations.load_manifest_deps(manifest)
 
     is_pkg = pkg_or_app !== nothing && any(dep -> dep.name == pkg_or_app, values(manifest.deps))
@@ -413,7 +412,7 @@ function status(pkg_or_app::Union{PackageSpec, Nothing} = nothing)
 end
 
 function precompile(pkg::Union{Nothing, String} = nothing)
-    manifest = Pkg.Types.read_manifest(joinpath(app_env_folder(), "AppManifest.toml"))
+    manifest = Pkg.Types.read_manifest(app_manifest_file())
     deps = Pkg.Operations.load_manifest_deps(manifest)
     for dep in deps
         # TODO: Parallel app compilation..?
@@ -452,7 +451,7 @@ function rm(pkg_or_app::Union{PackageSpec, Nothing} = nothing)
 
     require_not_empty(pkg_or_app, :rm)
 
-    manifest = Pkg.Types.read_manifest(joinpath(app_env_folder(), "AppManifest.toml"))
+    manifest = Pkg.Types.read_manifest(app_manifest_file())
     dep_idx = findfirst(dep -> dep.name == pkg_or_app, manifest.deps)
     if dep_idx !== nothing
         dep = manifest.deps[dep_idx]
@@ -463,21 +462,27 @@ function rm(pkg_or_app::Union{PackageSpec, Nothing} = nothing)
             rm_shim(appname; force = true)
         end
         if dep.path === nothing
-            Base.rm(joinpath(app_env_folder(), dep.name); recursive = true)
+            Base.rm(joinpath(app_env_folder(), dep.name); recursive = true, force = true)
         end
     else
-        for (uuid, pkg) in manifest.deps
+        found = false
+        for (uuid, pkg) in collect(manifest.deps)
             app_idx = findfirst(app -> app.name == pkg_or_app, pkg.apps)
-            if app_idx !== nothing
-                app = pkg.apps[app_idx]
-                @info "Deleted app $(app.name)"
-                delete!(pkg.apps, app.name)
-                rm_shim(app.name; force = true)
-            end
+            app_idx === nothing && continue
+            found = true
+            app = pkg.apps[app_idx]
+            @info "Deleted app $(app.name)"
+            delete!(pkg.apps, app.name)
+            rm_shim(app.name; force = true)
             if isempty(pkg.apps)
                 delete!(manifest.deps, uuid)
-                Base.rm(joinpath(app_env_folder(), pkg.name); recursive = true)
+                if pkg.path === nothing
+                    Base.rm(joinpath(app_env_folder(), pkg.name); recursive = true, force = true)
+                end
             end
+        end
+        if !found
+            pkgerror("no app or package named `$(pkg_or_app)` found in the app manifest")
         end
     end
     # XXX: What happens if something fails above and we do not write out the updated manifest?

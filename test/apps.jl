@@ -67,6 +67,18 @@ using Test
             @test Sys.which(cliexename) == nothing
             @test Sys.which(nestedexename) == nothing
             @test Sys.which(flagsexename) == nothing
+
+            # Removing apps one by one; removing the last one removes the package
+            Pkg.Apps.develop(path = joinpath(@__DIR__, "test_packages", "Rot13.jl"))
+            for app in ("juliarot13", "juliarot13cli", "juliarot13nested", "juliarot13flags")
+                Pkg.Apps.rm(app)
+            end
+            @test Sys.which(exename) == nothing
+            @test Sys.which(flagsexename) == nothing
+            manifest = Pkg.Types.read_manifest(joinpath(first(DEPOT_PATH), "environments", "apps", "AppManifest.toml"))
+            @test isempty(manifest.deps)
+            # Removing something that is not installed errors
+            @test_throws Pkg.Types.PkgError Pkg.Apps.rm("juliarot13")
         end
     end
 
