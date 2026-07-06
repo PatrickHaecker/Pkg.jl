@@ -200,7 +200,18 @@ using Test
     isolate(loaded_depot = true) do
         Pkg.Registry.add("General")
         Pkg.Apps.add(name = "Runic", version = "1.5.1")
+        app_manifest() = Pkg.Types.read_manifest(joinpath(first(DEPOT_PATH), "environments", "apps", "AppManifest.toml"))
+        runic_version() = only(e for e in values(app_manifest().deps) if e.name == "Runic").version
+        @test runic_version() == v"1.5.1"
+        # updating should bump the app itself to the latest version (#4634)
         Pkg.Apps.update("Runic")
+        @test runic_version() > v"1.5.1"
+        # update with no arguments updates all apps
+        Pkg.Apps.update()
+        # updating by app name also works
+        Pkg.Apps.update("runic")
+        # unknown app/package name errors
+        @test_throws Pkg.Types.PkgError Pkg.Apps.update("DoesNotExist")
     end
 end
 

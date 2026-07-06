@@ -4,7 +4,7 @@ using Pkg
 using Pkg: atomic_toml_write
 using Pkg.Versions
 using Pkg.Types: AppInfo, PackageSpec, Context, EnvCache, PackageEntry, Manifest, handle_repo_add!, handle_repo_develop!, write_manifest, write_project,
-    pkgerror, projectfile_path, manifestfile_path
+    pkgerror, projectfile_path
 using Pkg.Operations: print_single, source_path, update_package_add
 using Pkg.API: handle_package_input!
 using TOML, UUIDs
@@ -319,43 +319,48 @@ end
 
 update(pkgs_or_apps::String) = update([pkgs_or_apps])
 function update(pkgs_or_apps::Vector)
-    for pkg_or_app in pkgs_or_apps
-        if pkg_or_app isa String
-            pkg_or_app = PackageSpec(pkg_or_app)
+    if isempty(pkgs_or_apps)
+        update(nothing)
+    else
+        for pkg_or_app in pkgs_or_apps
+            if pkg_or_app isa String
+                pkg_or_app = PackageSpec(pkg_or_app)
+            end
+            update(pkg_or_app)
         end
-        update(pkg_or_app)
     end
     return
 end
 
-# XXX: Is updating an app ever different from rm-ing and adding it from scratch?
 function update(pkg::Union{PackageSpec, Nothing} = nothing)
     ctx = app_context()
     manifest = ctx.env.manifest
     deps = Pkg.Operations.load_manifest_deps(manifest)
+    updated = false
     for dep in deps
         info = manifest.deps[dep.uuid]
-        if pkg === nothing || info.name !== pkg.name
+        if pkg !== nothing && info.name != pkg.name && !(pkg.name in keys(info.apps))
             continue
         end
-        Pkg.activate(joinpath(app_env_folder(), info.name)) do
-            # precompile only after updating all apps?
-            Pkg.update()
+        updated = true
+        if info.path !== nothing
+            # Developed app: update the dependencies of the developed project
+            # and refresh the app info from it
+            sourcepath = abspath(source_path(ctx.env.manifest_file, info))
+            Pkg.activate(sourcepath) do
+                Pkg.update()
+            end
+            develop(PackageSpec(path = sourcepath))
+        elseif info.repo.source !== nothing || info.repo.rev !== nothing
+            # Repo tracked app: re-add to fetch the latest revision
+            add(PackageSpec(name = info.name, uuid = info.uuid, url = info.repo.source, rev = info.repo.rev, subdir = info.repo.subdir))
+        else
+            # Registry tracked app: re-add to resolve the latest version
+            add(PackageSpec(name = info.name, uuid = info.uuid))
         end
-        sourcepath = abspath(source_path(ctx.env.manifest_file, info))
-        project = get_project(sourcepath)
-        # Get the tree hash from the project file
-        manifest_file = manifestfile_path(joinpath(app_env_folder(), info.name))
-        manifest_app = Pkg.Types.read_manifest(manifest_file)
-        manifest_entry = manifest_app.deps[info.uuid]
-
-        entry = PackageEntry(;
-            apps = project.apps, name = manifest_entry.name, version = manifest_entry.version, tree_hash = manifest_entry.tree_hash,
-            path = manifest_entry.path, repo = manifest_entry.repo, uuid = manifest_entry.uuid
-        )
-
-        manifest.deps[dep.uuid] = entry
-        Pkg.Types.write_manifest(manifest, app_manifest_file())
+    end
+    if pkg !== nothing && !updated
+        pkgerror("no app or package named `$(pkg.name)` found in the app manifest")
     end
     return
 end
