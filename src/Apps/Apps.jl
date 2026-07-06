@@ -216,6 +216,23 @@ function _resolve(manifest::Manifest, pkgname = nothing)
 end
 
 
+"""
+    Pkg.Apps.add(pkg::Union{String, PackageSpec})
+    Pkg.Apps.add(; name, uuid, version, url, rev, path, subdir)
+
+Install the apps of package `pkg`. The package is installed into an isolated
+environment and shims for its apps are created in `~/.julia/bin` (which should
+be added to `PATH`). Apps can be added from a registry, a git URL, or a local
+path (which needs to be a git repository).
+
+# Examples
+```julia
+Pkg.Apps.add("Runic")
+Pkg.Apps.add(name = "Runic", version = "1.5")
+Pkg.Apps.add(url = "https://github.com/fredrikekre/Runic.jl", rev = "master")
+Pkg.Apps.add(path = "path/to/Package")
+```
+"""
 function add(pkg::Vector{PackageSpec})
     for p in pkg
         add(p)
@@ -269,6 +286,19 @@ function add(pkg::PackageSpec)
     return check_apps_in_path(project.apps)
 end
 
+"""
+    Pkg.Apps.develop(pkg::Union{String, PackageSpec})
+    Pkg.Apps.develop(; name, uuid, version, url, rev, path, subdir)
+
+Like [`Pkg.Apps.add`](@ref) but the apps run directly from the developed
+project so changes made to it are immediately reflected in the apps.
+
+# Examples
+```julia
+Pkg.Apps.develop("Runic")
+Pkg.Apps.develop(path = "path/to/Package")
+```
+"""
 function develop(pkg::Vector{PackageSpec})
     for p in pkg
         develop(p)
@@ -316,6 +346,13 @@ function develop(pkg::PackageSpec)
 end
 
 
+"""
+    Pkg.Apps.update(name::Union{Nothing, String} = nothing)
+
+Update the package providing the app `name` (or the package named `name`) to
+the latest compatible version, or all installed apps if no name is given.
+For developed packages the dependencies of the project are updated instead.
+"""
 update(pkgs_or_apps::String) = update([pkgs_or_apps])
 function update(pkgs_or_apps::Vector)
     if isempty(pkgs_or_apps)
@@ -364,6 +401,12 @@ function update(pkg::Union{PackageSpec, Nothing} = nothing)
     return
 end
 
+"""
+    Pkg.Apps.status(name::Union{Nothing, String} = nothing)
+
+Show the installed apps, the version of their package, and the julia command
+used to run them. If `name` is given, limit the output to that app or package.
+"""
 function status(pkgs_or_apps::Vector)
     return if isempty(pkgs_or_apps)
         status()
@@ -435,6 +478,13 @@ function require_not_empty(pkgs, f::Symbol)
     end
 end
 
+"""
+    Pkg.Apps.rm(name::String)
+
+Remove the app `name`, or all apps of the package named `name`. This removes
+the shims from `~/.julia/bin` and, when the last app of a package is removed,
+its app environment.
+"""
 rm(pkgs_or_apps::String) = rm([pkgs_or_apps])
 function rm(pkgs_or_apps::Vector)
     for pkg_or_app in pkgs_or_apps
