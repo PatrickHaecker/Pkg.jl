@@ -196,6 +196,25 @@ using Test
             withenv("PATH" => string(joinpath(first(DEPOT_PATH), "bin"), sep, current_path)) do
                 @test read(`$exename`, String) == "hello from SomeDep\n"
             end
+
+            # update of a repo-tracked app fetches the latest commit (#4634)
+            write(
+                joinpath(someapp, "src", "SomeApp.jl"), """
+                module SomeApp
+                using SomeDep
+                function (@main)(ARGS)
+                    SomeDep.greet()
+                    println("v2")
+                    return 0
+                end
+                end
+                """
+            )
+            git_init_and_commit(someapp; msg = "v2")
+            Pkg.Apps.update("SomeApp")
+            withenv("PATH" => string(joinpath(first(DEPOT_PATH), "bin"), sep, current_path)) do
+                @test read(`$exename`, String) == "hello from SomeDep\nv2\n"
+            end
             Pkg.Apps.rm("SomeApp")
 
             # develop of an app with dependencies should give it a resolved
@@ -203,7 +222,7 @@ using Test
             Pkg.Apps.develop(path = someapp)
             @test isfile(joinpath(someapp, "Manifest.toml"))
             withenv("PATH" => string(joinpath(first(DEPOT_PATH), "bin"), sep, current_path)) do
-                @test read(`$exename`, String) == "hello from SomeDep\n"
+                @test read(`$exename`, String) == "hello from SomeDep\nv2\n"
             end
             Pkg.Apps.rm("SomeApp")
         end
