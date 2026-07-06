@@ -1,7 +1,7 @@
 module Apps
 
 using Pkg
-using Pkg: atomic_toml_write
+using Pkg: atomic_toml_write, stdout_f
 using Pkg.Versions
 using Pkg.Types: AppInfo, PackageSpec, Context, EnvCache, PackageEntry, Manifest, handle_repo_add!, handle_repo_develop!, write_manifest, write_project,
     pkgerror, projectfile_path
@@ -9,6 +9,7 @@ using Pkg.Operations: print_single, source_path, update_package_add
 using Pkg.API: handle_package_input!
 using TOML, UUIDs
 using Dates
+import FileWatching
 import Pkg.Registry
 
 public add, rm, status, update, develop
@@ -20,35 +21,47 @@ julia_executable() = joinpath(Sys.BINDIR, "julia" * (Sys.iswindows() ? ".exe" : 
 
 app_context() = Context(env = EnvCache(joinpath(app_env_folder(), "Project.toml")))
 
+const _apps_lock_held = Base.ScopedValues.ScopedValue(false)
+
+# Serialize operations that mutate the app environments and the AppManifest
+function with_apps_lock(f)
+    # Operations can be nested (e.g. update calls add) so the lock is reentrant
+    _apps_lock_held[] && return f()
+    mkpath(app_env_folder())
+    return FileWatching.mkpidlock(joinpath(app_env_folder(), ".pid"), stale_age = 10) do
+        Base.ScopedValues.@with _apps_lock_held => true f()
+    end
+end
+
 function validate_app_name(name::AbstractString)
     if isempty(name)
-        error("App name cannot be empty")
+        pkgerror("App name cannot be empty")
     end
     if !occursin(r"^[a-zA-Z][a-zA-Z0-9_-]*$", name)
-        error("App name must start with a letter and contain only letters, numbers, underscores, and hyphens")
+        pkgerror("App name must start with a letter and contain only letters, numbers, underscores, and hyphens")
     end
     return if occursin(r"\.\.", name) || occursin(r"[/\\]", name)
-        error("App name cannot contain path traversal sequences or path separators")
+        pkgerror("App name cannot contain path traversal sequences or path separators")
     end
 end
 
 function validate_package_name(name::AbstractString)
     if isempty(name)
-        error("Package name cannot be empty")
+        pkgerror("Package name cannot be empty")
     end
     return if !occursin(r"^[a-zA-Z][a-zA-Z0-9_]*$", name)
-        error("Package name must start with a letter and contain only letters, numbers, and underscores")
+        pkgerror("Package name must start with a letter and contain only letters, numbers, and underscores")
     end
 end
 
 function validate_submodule_name(name::Union{AbstractString, Nothing})
     return if name !== nothing
         if isempty(name)
-            error("Submodule name cannot be empty")
+            pkgerror("Submodule name cannot be empty")
         end
         # Nested submodules are allowed, e.g. `Foo.Bar`
         if !occursin(r"^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)*$", name)
-            error("Submodule name must be dot-separated identifiers, each starting with a letter and containing only letters, numbers, and underscores")
+            pkgerror("Submodule name must be dot-separated identifiers, each starting with a letter and containing only letters, numbers, and underscores")
         end
     end
 end
@@ -62,10 +75,10 @@ end
 function get_project(sourcepath)
     project_file = projectfile_path(sourcepath)
 
-    isfile(project_file) || error("Project file not found: $project_file")
+    isfile(project_file) || pkgerror("Project file not found: $project_file")
 
     project = Pkg.Types.read_project(project_file)
-    isempty(project.apps) && error("No apps found in Project.toml for package $(project.name) at version $(project.version)")
+    isempty(project.apps) && pkgerror("No apps found in Project.toml for package $(project.name) at version $(project.version)")
     return project
 end
 
@@ -135,7 +148,7 @@ function get_max_version_register(pkg::PackageSpec, regs)
         end
     end
     if max_v === nothing
-        error("Suitable package version for $(pkg.name) not found in any registries.")
+        pkgerror("Suitable package version for $(pkg.name) not found in any registries.")
     end
     return (max_v, tree_hash)
 end
@@ -186,10 +199,17 @@ function _resolve(manifest::Manifest, pkgname = nothing)
 
             project_data = TOML.parsefile(projectfile)
 
+            # Paths inside the depot are written relative to the app environment
+            # so that the depot can be relocated
+            depot_prefix = joinpath(normpath(first(DEPOT_PATH)), "")
+            project_dir = dirname(projectfile)
+            relative_to_depot(path) = startswith(normpath(path), depot_prefix) ? relpath(path, project_dir) : path
+
             # Add entryfile stanza pointing to the package entry file,
             # respecting an existing entryfile in the project
             entryfile = get(project_data, "entryfile", joinpath("src", "$(pkg.name).jl"))
-            project_data["entryfile"] = isabspath(entryfile) ? entryfile : normpath(joinpath(sourcepath, entryfile))
+            entryfile = isabspath(entryfile) ? entryfile : normpath(joinpath(sourcepath, entryfile))
+            project_data["entryfile"] = relative_to_depot(entryfile)
 
             # Relative paths in [sources] are relative to the original project
             # location, not the app environment the project file is copied to.
@@ -217,7 +237,7 @@ function _resolve(manifest::Manifest, pkgname = nothing)
                         delete!(source, "path")
                         isempty(source) && delete!(sources, depname)
                     else
-                        source["path"] = candidates[resolved]
+                        source["path"] = relative_to_depot(candidates[resolved])
                     end
                 end
                 isempty(sources) && delete!(project_data, "sources")
@@ -225,7 +245,7 @@ function _resolve(manifest::Manifest, pkgname = nothing)
 
             atomic_toml_write(projectfile, project_data)
         else
-            error("could not find project file for package $pkg")
+            pkgerror("could not find project file for package $pkg")
         end
 
         # Create a manifest with the manifest entry
@@ -268,7 +288,8 @@ function add(pkg::Vector{PackageSpec})
 end
 
 
-function add(pkg::PackageSpec)
+add(pkg::PackageSpec) = with_apps_lock(() -> _add(pkg))
+function _add(pkg::PackageSpec)
     handle_package_input!(pkg)
 
     ctx = app_context()
@@ -335,7 +356,8 @@ function develop(pkg::Vector{PackageSpec})
     return
 end
 
-function develop(pkg::PackageSpec)
+develop(pkg::PackageSpec) = with_apps_lock(() -> _develop(pkg))
+function _develop(pkg::PackageSpec)
     if pkg.path !== nothing
         pkg.path = abspath(pkg.path)
     end
@@ -398,7 +420,8 @@ function update(pkgs_or_apps::Vector)
     return
 end
 
-function update(pkg::Union{PackageSpec, Nothing} = nothing)
+update(pkg::Union{PackageSpec, Nothing} = nothing) = with_apps_lock(() -> _update(pkg))
+function _update(pkg::Union{PackageSpec, Nothing})
     ctx = app_context()
     manifest = ctx.env.manifest
     deps = Pkg.Operations.load_manifest_deps(manifest)
@@ -437,20 +460,20 @@ end
 Show the installed apps, the version of their package, and the julia command
 used to run them. If `name` is given, limit the output to that app or package.
 """
-function status(pkgs_or_apps::Vector)
+function status(pkgs_or_apps::Vector; io::IO = stdout_f())
     return if isempty(pkgs_or_apps)
-        status()
+        status(; io)
     else
         for pkg_or_app in pkgs_or_apps
             if pkg_or_app isa String
                 pkg_or_app = PackageSpec(pkg_or_app)
             end
-            status(pkg_or_app)
+            status(pkg_or_app; io)
         end
     end
 end
 
-function status(pkg_or_app::Union{PackageSpec, Nothing} = nothing)
+function status(pkg_or_app::Union{PackageSpec, Nothing} = nothing; io::IO = stdout_f())
     # TODO: Sort.
     pkg_or_app = pkg_or_app === nothing ? nothing : pkg_or_app.name
     manifest = Pkg.Types.read_manifest(app_manifest_file())
@@ -469,16 +492,16 @@ function status(pkg_or_app::Union{PackageSpec, Nothing} = nothing)
             end
         end
 
-        printstyled("[", string(dep.uuid)[1:8], "] "; color = :light_black)
-        print_single(stdout, dep)
-        println()
+        printstyled(io, "[", string(dep.uuid)[1:8], "] "; color = :light_black)
+        print_single(io, dep)
+        println(io)
         for (appname, appinfo) in info.apps
             if !is_pkg && pkg_or_app !== nothing && appname !== pkg_or_app
                 continue
             end
             julia_cmd = contractuser(appinfo.julia_command)
-            printstyled("  $(appname)", color = :green)
-            printstyled(" $(julia_cmd) \n", color = :gray)
+            printstyled(io, "  $(appname)", color = :green)
+            printstyled(io, " $(julia_cmd) \n", color = :gray)
         end
     end
     return
@@ -529,7 +552,8 @@ function rm(pkgs_or_apps::Vector)
     return
 end
 
-function rm(pkg_or_app::Union{PackageSpec, Nothing} = nothing)
+rm(pkg_or_app::Union{PackageSpec, Nothing} = nothing) = with_apps_lock(() -> _rm(pkg_or_app))
+function _rm(pkg_or_app::Union{PackageSpec, Nothing})
     pkg_or_app = pkg_or_app === nothing ? nothing : pkg_or_app.name
 
     require_not_empty(pkg_or_app, :rm)
@@ -601,7 +625,7 @@ end
 #########
 
 const SHIM_COMMENT = Sys.iswindows() ? "REM " : "#"
-const SHIM_VERSION = 1.1
+const SHIM_VERSION = 1.2
 const SHIM_HEADER = """$SHIM_COMMENT This file is generated by the Julia package manager.
 $SHIM_COMMENT Shim version: $SHIM_VERSION"""
 
@@ -642,8 +666,16 @@ function shell_shim(julia_escaped::String, module_spec_escaped::String, env, jul
     julia_flags_escaped = join(Base.shell_escape.(julia_flags), " ")
     julia_flags_part = isempty(julia_flags) ? "" : " $julia_flags_escaped"
 
-    load_path_escaped = Base.shell_escape(env)
-    depot_path_escaped = Base.shell_escape(join(DEPOT_PATH, ':'))
+    depot = normpath(first(DEPOT_PATH))
+    depot_escaped = Base.shell_escape(depot)
+    env = normpath(env)
+    # Environments inside the depot are located relative to it so that the
+    # depot can be relocated (developed projects keep their absolute path)
+    load_path_part = if startswith(env, joinpath(depot, ""))
+        "\"\$depot/$(join(splitpath(relpath(env, depot)), '/'))\""
+    else
+        Base.shell_escape(env)
+    end
 
     return """
     #!/bin/sh
@@ -651,9 +683,18 @@ function shell_shim(julia_escaped::String, module_spec_escaped::String, env, jul
 
     $SHIM_HEADER
 
+    # Locate the depot from the location of this script (<depot>/bin/<app>) so
+    # that a relocated depot keeps working; fall back to the install time depot
+    script_dir=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd -P)
+    depot=\$(dirname -- "\$script_dir")
+    if [ ! -e "\$depot/environments/apps/AppManifest.toml" ]; then
+        depot=$depot_escaped
+    fi
+
     # Pin Julia paths for the child process
-    export JULIA_LOAD_PATH=$load_path_escaped
-    export JULIA_DEPOT_PATH=$depot_path_escaped
+    # (the trailing ':' appends the default system depots)
+    export JULIA_DEPOT_PATH="\$depot:"
+    export JULIA_LOAD_PATH=$load_path_part
 
     # Allow overriding Julia executable via environment variable
     if [ -n "\${JULIA_APPS_JULIA_CMD:-}" ]; then
@@ -663,27 +704,28 @@ function shell_shim(julia_escaped::String, module_spec_escaped::String, env, jul
     fi
 
     # If a `--` appears, args before it go to Julia, after it to the app.
-    # If no `--` appears, all original args go to the app (no Julia args).
-    found_separator=false
-    for a in "\$@"; do
-        [ "\$a" = "--" ] && { found_separator=true; break; }
+    # If no `--` appears, all args go to the app (no Julia args).
+    # Rebuild "\$@" in place as: <julia args> -m <module> <app args>, which
+    # preserves argument boundaries exactly.
+    orig_count=\$#
+    seen_sep=false
+    i=0
+    while [ "\$i" -lt "\$orig_count" ]; do
+        arg=\$1
+        shift
+        if [ "\$seen_sep" = false ] && [ "\$arg" = "--" ]; then
+            seen_sep=true
+            set -- "\$@" -m $module_spec_escaped
+        else
+            set -- "\$@" "\$arg"
+        fi
+        i=\$((i + 1))
     done
-
-    if [ "\$found_separator" = "true" ]; then
-        # Build julia_args until `--`, then leave the rest in "\$@"
-        julia_args=""
-        while [ "\$#" -gt 0 ]; do
-            case "\$1" in
-            --) shift; break ;;
-            *)  julia_args="\$julia_args\${julia_args:+ }\$1"; shift ;;
-            esac
-        done
-        # Here: "\$@" are the app args after the separator
-        exec "\$julia_cmd" --startup-file=no$julia_flags_part \$julia_args -m $module_spec_escaped "\$@"
-    else
-        # No separator: all original args go straight to the app
-        exec "\$julia_cmd" --startup-file=no$julia_flags_part -m $module_spec_escaped "\$@"
+    if [ "\$seen_sep" = false ]; then
+        set -- -m $module_spec_escaped "\$@"
     fi
+
+    exec "\$julia_cmd" --startup-file=no$julia_flags_part "\$@"
     """
 end
 
@@ -696,7 +738,15 @@ function windows_shim(
     flags_escaped = join(Base.shell_escape_wincmd.(julia_flags), " ")
     flags_part = isempty(julia_flags) ? "" : " $flags_escaped"
 
-    depot_path = join(DEPOT_PATH, ';')
+    depot = normpath(first(DEPOT_PATH))
+    env = normpath(env)
+    # Environments inside the depot are located relative to it so that the
+    # depot can be relocated (developed projects keep their absolute path)
+    load_path = if startswith(env, joinpath(depot, ""))
+        "%depot%\\$(relpath(env, depot))"
+    else
+        env
+    end
 
     return """
     @echo off
@@ -704,9 +754,15 @@ function windows_shim(
 
     $SHIM_HEADER
 
+    rem --- Locate the depot from the location of this script (<depot>\\bin\\<app>) so
+    rem --- that a relocated depot keeps working; fall back to the install time depot
+    for %%I in ("%~dp0..") do set "depot=%%~fI"
+    if not exist "%depot%\\environments\\apps\\AppManifest.toml" set "depot=$depot"
+
     rem --- Environment (no delayed expansion here to keep '!' literal) ---
-    set "JULIA_LOAD_PATH=$env"
-    set "JULIA_DEPOT_PATH=$depot_path"
+    rem --- (the trailing ';' appends the default system depots) ---
+    set "JULIA_LOAD_PATH=$load_path"
+    set "JULIA_DEPOT_PATH=%depot%;"
 
     rem --- Allow overriding Julia executable via environment variable ---
     if defined JULIA_APPS_JULIA_CMD (

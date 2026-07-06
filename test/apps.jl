@@ -60,6 +60,24 @@ using Test
                     mock_output = read(`$exename test`, String)
                     @test contains(mock_output, "MOCK_JULIA_EXECUTED")
                 end
+
+                # Test that argument boundaries are preserved exactly
+                if !Sys.iswindows()
+                    argv_mock = joinpath(tmpdir, "argv-julia")
+                    write(argv_mock, "#!/bin/sh\nfor a in \"\$@\"; do printf '%s\\n' \"\$a\"; done\n")
+                    chmod(argv_mock, 0o755)
+                    argv(args) = withenv("JULIA_APPS_JULIA_CMD" => argv_mock) do
+                        split(read(`$exename $args`, String), "\n"; keepempty = true)[1:(end - 1)]
+                    end
+                    # app args with spaces and empty strings
+                    @test argv(["a b", "", "c"]) == ["--startup-file=no", "-m", "Rot13", "a b", "", "c"]
+                    # julia arg containing a space
+                    @test argv(["--project=a b", "--", "z"]) == ["--startup-file=no", "--project=a b", "-m", "Rot13", "z"]
+                    # only the first -- is the separator
+                    @test argv(["--", "a", "--", "b"]) == ["--startup-file=no", "-m", "Rot13", "a", "--", "b"]
+                    # glob characters are not expanded
+                    @test argv(["*"]) == ["--startup-file=no", "-m", "Rot13", "*"]
+                end
             end
 
             Pkg.Apps.rm("Rot13")
@@ -200,6 +218,16 @@ using Test
             withenv("PATH" => string(joinpath(first(DEPOT_PATH), "bin"), sep, current_path)) do
                 @test read(`$exename`, String) == "hello from SomeDep\n"
             end
+
+            # a relocated depot keeps working: shims locate the depot from
+            # their own location and the app environment uses relative paths
+            relocated = joinpath(mktempdir(), "relocated-depot")
+            mkpath(relocated)
+            for dir in ("bin", "environments", "packages")
+                srcdir = joinpath(first(DEPOT_PATH), dir)
+                isdir(srcdir) && cp(srcdir, joinpath(relocated, dir))
+            end
+            @test read(`$(joinpath(relocated, "bin", exename))`, String) == "hello from SomeDep\n"
 
             # update of a repo-tracked app fetches the latest commit (#4634)
             # and removes shims for apps the new version no longer provides
