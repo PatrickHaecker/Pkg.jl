@@ -129,6 +129,66 @@ using Test
     end
 
     isolate(loaded_depot = true) do
+        # Relative paths in [sources] of an app's Project.toml (#4532)
+        mktempdir() do tmpdir
+            sep = Sys.iswindows() ? ';' : ':'
+            somedep = joinpath(tmpdir, "SomeDep")
+            mkpath(joinpath(somedep, "src"))
+            write(
+                joinpath(somedep, "Project.toml"), """
+                name = "SomeDep"
+                uuid = "b5c6e794-171e-4c69-906b-483714562d9a"
+                version = "0.1.0"
+                """
+            )
+            write(
+                joinpath(somedep, "src", "SomeDep.jl"), """
+                module SomeDep
+                greet() = println("hello from SomeDep")
+                end
+                """
+            )
+            someapp_stage = joinpath(tmpdir, "staging", "SomeApp")
+            mkpath(joinpath(someapp_stage, "src"))
+            write(
+                joinpath(someapp_stage, "Project.toml"), """
+                name = "SomeApp"
+                uuid = "6fe06ad9-5ce4-4b58-bb0c-29b0d7e1fd75"
+                version = "0.1.0"
+
+                [deps]
+                SomeDep = "b5c6e794-171e-4c69-906b-483714562d9a"
+
+                [sources]
+                SomeDep = {path = "../SomeDep"}
+
+                [apps]
+                someapp = {}
+                """
+            )
+            write(
+                joinpath(someapp_stage, "src", "SomeApp.jl"), """
+                module SomeApp
+                using SomeDep
+                function (@main)(ARGS)
+                    SomeDep.greet()
+                    return 0
+                end
+                end
+                """
+            )
+            someapp = git_init_package(tmpdir, someapp_stage)
+            Pkg.Apps.add(path = someapp)
+            exename = Sys.iswindows() ? "someapp.bat" : "someapp"
+            current_path = ENV["PATH"]
+            withenv("PATH" => string(joinpath(first(DEPOT_PATH), "bin"), sep, current_path)) do
+                @test read(`$exename`, String) == "hello from SomeDep\n"
+            end
+            Pkg.Apps.rm("SomeApp")
+        end
+    end
+
+    isolate(loaded_depot = true) do
         Pkg.Registry.add("General")
         Pkg.Apps.add(name = "Runic", version = "1.5.1")
         Pkg.Apps.update("Runic")

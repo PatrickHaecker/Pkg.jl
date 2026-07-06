@@ -159,10 +159,45 @@ function _resolve(manifest::Manifest, pkgname = nothing)
             cp(original_project_file, projectfile; force = true)
             chmod(projectfile, 0o644)  # Make the copied project file writable
 
-            # Add entryfile stanza pointing to the package entry file
-            # TODO: What if project file has its own entryfile?
             project_data = TOML.parsefile(projectfile)
-            project_data["entryfile"] = joinpath(sourcepath, "src", "$(pkg.name).jl")
+
+            # Add entryfile stanza pointing to the package entry file,
+            # respecting an existing entryfile in the project
+            entryfile = get(project_data, "entryfile", joinpath("src", "$(pkg.name).jl"))
+            project_data["entryfile"] = isabspath(entryfile) ? entryfile : normpath(joinpath(sourcepath, entryfile))
+
+            # Relative paths in [sources] are relative to the original project
+            # location, not the app environment the project file is copied to.
+            # Resolve them against the original location (for packages added
+            # from a local path) or the installed package tree; drop entries
+            # that do not resolve so the dependency comes from a registry.
+            sources = get(project_data, "sources", nothing)
+            if sources !== nothing
+                original_dir = nothing
+                if pkg.repo.source !== nothing && !Pkg.isurl(pkg.repo.source)
+                    original_dir = normpath(joinpath(app_env_folder(), pkg.repo.source))
+                    if pkg.repo.subdir !== nothing
+                        original_dir = joinpath(original_dir, pkg.repo.subdir)
+                    end
+                end
+                for (depname, source) in collect(sources)
+                    path = get(source, "path", nothing)
+                    (path === nothing || isabspath(path)) && continue
+                    candidates = String[]
+                    original_dir !== nothing && push!(candidates, normpath(joinpath(original_dir, path)))
+                    push!(candidates, normpath(joinpath(sourcepath, path)))
+                    resolved = findfirst(isdir, candidates)
+                    if resolved === nothing
+                        @warn "Ignoring source with relative path `$(path)` for dependency $(depname) of package $(pkg.name) since it does not exist relative to the installed package"
+                        delete!(source, "path")
+                        isempty(source) && delete!(sources, depname)
+                    else
+                        source["path"] = candidates[resolved]
+                    end
+                end
+                isempty(sources) && delete!(project_data, "sources")
+            end
+
             atomic_toml_write(projectfile, project_data)
         else
             error("could not find project file for package $pkg")
