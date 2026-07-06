@@ -13,6 +13,7 @@ using Test
         current_path = ENV["PATH"]
         exename = Sys.iswindows() ? "juliarot13.bat" : "juliarot13"
         cliexename = Sys.iswindows() ? "juliarot13cli.bat" : "juliarot13cli"
+        nestedexename = Sys.iswindows() ? "juliarot13nested.bat" : "juliarot13nested"
         flagsexename = Sys.iswindows() ? "juliarot13flags.bat" : "juliarot13flags"
         withenv("PATH" => string(joinpath(first(DEPOT_PATH), "bin"), sep, current_path)) do
             # Test original app
@@ -22,6 +23,10 @@ using Test
             # Test submodule app
             @test contains(Sys.which("$cliexename"), first(DEPOT_PATH))
             @test read(`$cliexename test`, String) == "CLI: grfg\n"
+
+            # Test nested submodule app
+            @test contains(Sys.which("$nestedexename"), first(DEPOT_PATH))
+            @test read(`$nestedexename test`, String) == "Nested: grfg\n"
 
             # Test flags app with default julia_flags
             @test contains(Sys.which("$flagsexename"), first(DEPOT_PATH))
@@ -60,6 +65,7 @@ using Test
             Pkg.Apps.rm("Rot13")
             @test Sys.which(exename) == nothing
             @test Sys.which(cliexename) == nothing
+            @test Sys.which(nestedexename) == nothing
             @test Sys.which(flagsexename) == nothing
         end
     end

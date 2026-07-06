@@ -45,8 +45,9 @@ function validate_submodule_name(name::Union{AbstractString, Nothing})
         if isempty(name)
             error("Submodule name cannot be empty")
         end
-        if !occursin(r"^[a-zA-Z][a-zA-Z0-9_]*$", name)
-            error("Submodule name must start with a letter and contain only letters, numbers, and underscores")
+        # Nested submodules are allowed, e.g. `Foo.Bar`
+        if !occursin(r"^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)*$", name)
+            error("Submodule name must be dot-separated identifiers, each starting with a letter and containing only letters, numbers, and underscores")
         end
     end
 end
