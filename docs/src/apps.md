@@ -180,7 +180,7 @@ pkg> app develop path/to/Package
 
 Installed apps are updated with `pkg> app update [name]` (all apps if no name is given), listed with `pkg> app status`, and removed with `pkg> app rm name`.
 
-## API Reference
+## Apps API Reference
 
 ```@docs
 Pkg.Apps.add
