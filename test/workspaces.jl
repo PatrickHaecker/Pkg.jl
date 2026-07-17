@@ -233,6 +233,30 @@ end
     end
 end
 
+# A dependency that is itself a workspace project is located through workspace
+# membership, so Pkg must not create a redundant `[sources]` entry for it.
+# `WorkspacePathResolution`'s SubProjectA depends on its sibling SubProjectB;
+# with the authored source removed, resolving must not write it back.
+@testset "no [sources] created for workspace-internal dependencies" begin
+    isolate() do
+        mktempdir() do dir
+            path = copy_test_package(dir, "WorkspacePathResolution")
+            cd(path) do
+                with_current_env() do
+                    project_file = joinpath("SubProjectA", "Project.toml")
+                    project = TOML.parsefile(project_file)
+                    delete!(project, "sources")
+                    Pkg.Types.write_project(project, project_file)
+
+                    Pkg.activate("SubProjectA")
+                    Pkg.resolve()
+                    @test !haskey(TOML.parsefile(project_file), "sources")
+                end
+            end
+        end
+    end
+end
+
 # Two workspace member projects that pin the same dependency to different sources
 # cannot be merged into a single manifest entry, so resolving must error clearly.
 @testset "workspace projects with conflicting [sources]" begin
